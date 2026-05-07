@@ -2,13 +2,11 @@ import { useState, useEffect } from 'react';
 
 const DEFAULTS = {
   twilioPhone: '',
-  telegramChatId: '',
   violenceThreshold: 0.6,
   yoloConfidence: 0.4,
   frameSkip: 2,
   saveSnapshots: true,
   enableTwilio: false,
-  enableTelegram: false,
 };
 
 export default function Settings() {
@@ -109,25 +107,6 @@ export default function Settings() {
               placeholder="+1234567890"
               className="w-full bg-white/[0.05] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-primary-500" />
             <p className="text-[10px] text-white/30 mt-1">Configure TWILIO_* credentials in your .env file</p>
-          </div>
-        )}
-      </section>
-
-      {/* Telegram */}
-      <section>
-        <h3 className="text-sm font-semibold text-white/50 uppercase tracking-wider mb-4">Telegram Bot Alerts</h3>
-        <label className="flex items-center gap-3 cursor-pointer mb-4">
-          <input type="checkbox" checked={settings.enableTelegram} onChange={e => update('enableTelegram', e.target.checked)}
-            className="w-4 h-4 rounded accent-primary-500" />
-          <span className="text-sm text-white/70">Enable Telegram notifications</span>
-        </label>
-        {settings.enableTelegram && (
-          <div>
-            <label className="text-sm text-white/50 mb-1 block">Telegram Chat ID</label>
-            <input type="text" value={settings.telegramChatId} onChange={e => update('telegramChatId', e.target.value)}
-              placeholder="123456789"
-              className="w-full bg-white/[0.05] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-primary-500" />
-            <p className="text-[10px] text-white/30 mt-1">Configure TELEGRAM_BOT_TOKEN in your .env file</p>
           </div>
         )}
       </section>

@@ -67,7 +67,7 @@ export default function App() {
       setJobId(data.job_id);
       setTab('live');
 
-      setTimeout(() => stream.startStream(), 100);
+      setTimeout(() => stream.startStream(data.job_id), 100);
     } catch (err) {
       console.error('Upload error:', err);
       alert('Upload failed: ' + err.message);
@@ -239,6 +239,103 @@ export default function App() {
             </div>
 
             <IncidentTimeline alerts={stream.allAlerts} />
+
+            {/* ── Results Panel (visible after completion or when alerts exist) ── */}
+            {(stream.status === 'completed' || stream.allAlerts.length > 0) && (
+              <div className="glass-card p-6 space-y-5 animate-fade-in">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                    <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    Analysis Results
+                  </h2>
+                  {stream.status === 'completed' && (
+                    <span className="px-3 py-1 rounded-full bg-green-500/10 text-green-400 text-xs font-medium">
+                      ✓ Analysis Complete
+                    </span>
+                  )}
+                </div>
+
+                {/* Summary stats */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-center">
+                    <div className="text-2xl font-bold text-white">{stream.allAlerts.length}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-white/30 mt-1">Total Alerts</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-center">
+                    <div className="text-2xl font-bold text-red-400">
+                      {stream.allAlerts.filter(a => a.event_type === 'Violence').length}
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wider text-white/30 mt-1">Violence</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-center">
+                    <div className="text-2xl font-bold text-orange-400">
+                      {stream.allAlerts.filter(a => ['Gun', 'Knife'].includes(a.event_type)).length}
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wider text-white/30 mt-1">Weapons</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-center">
+                    <div className="text-2xl font-bold text-yellow-400">
+                      {stream.allAlerts.filter(a => ['Fire', 'Smoke'].includes(a.event_type)).length}
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wider text-white/30 mt-1">Fire/Smoke</div>
+                  </div>
+                </div>
+
+                {/* Violent segments */}
+                {stream.allAlerts.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-white/70 mb-3 flex items-center gap-2">
+                      <svg className="w-4 h-4 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      Detected Incidents — Video Timestamps
+                    </h3>
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-2 scrollbar-thin">
+                      {stream.allAlerts.map((alert, i) => (
+                        <div key={i} className="flex items-center gap-3 p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.05] hover:bg-white/[0.05] transition-colors">
+                          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                            alert.event_type === 'Violence' ? 'bg-red-500' :
+                            ['Gun', 'Knife'].includes(alert.event_type) ? 'bg-orange-500' :
+                            'bg-yellow-500'
+                          }`} />
+                          <span className="font-mono text-sm text-primary-400 flex-shrink-0 min-w-[70px]">
+                            {alert.video_timestamp}
+                          </span>
+                          <span className="text-sm text-white/70 flex-1">{alert.event_type}</span>
+                          <span className="text-xs text-white/40 font-mono">
+                            {(alert.confidence * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Download buttons */}
+                <div className="flex flex-col sm:flex-row gap-3 pt-2">
+                  <button
+                    onClick={handleDownloadReport}
+                    className="btn-primary flex-1 flex items-center justify-center gap-2 py-3"
+                  >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    Download PDF Report
+                  </button>
+                  <button
+                    onClick={handleDownloadLog}
+                    className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-semibold text-sm border border-white/10 text-white/70 hover:bg-white/[0.05] hover:text-white transition-all"
+                  >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    Download CSV Log
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

@@ -25,8 +25,9 @@ export default function useSSEStream(jobId) {
   const eventSourceRef = useRef(null);
   const isMock = import.meta.env.VITE_MOCK === 'true';
 
-  const startStream = useCallback(() => {
-    if (!jobId && !isMock) return;
+  const startStream = useCallback((explicitJobId) => {
+    const activeJobId = explicitJobId || jobId;
+    if (!activeJobId && !isMock) return;
 
     setStatus('connecting');
     setError(null);
@@ -64,7 +65,7 @@ export default function useSSEStream(jobId) {
     }
 
     const apiBase = import.meta.env.VITE_API_URL || '';
-    const es = new EventSource(`${apiBase}/stream/${jobId}`);
+    const es = new EventSource(`${apiBase}/stream/${activeJobId}`);
     eventSourceRef.current = es;
 
     es.onopen = () => setStatus('streaming');

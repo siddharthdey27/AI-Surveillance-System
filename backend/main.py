@@ -161,21 +161,18 @@ def _process_video(job_id: str, result_queue: asyncio.Queue, loop: asyncio.Abstr
     frame_buffer = []
     BUFFER_MAX = 32
     frame_idx = 0
+    prev_gray = None  # For optical-flow violence detection
 
     guns_knives = models.get("guns_knives_model")
     fire_smoke = models.get("fire_smoke_model")
     violence_mdl = models.get("violence_model")
     v_shape = models.get("violence_input_shape")
+    using_pretrained = models.get("using_pretrained", False)
 
     yolo_conf = float(os.getenv("YOLO_CONF", "0.4"))
-    violence_conf = float(os.getenv("VIOLENCE_CONF", "0.8"))
+    violence_conf = float(os.getenv("VIOLENCE_CONF", "0.60"))
     frame_skip = int(os.getenv("FRAME_SKIP", "2"))
     save_snapshots = os.getenv("SAVE_SNAPSHOTS", "true").lower() == "true"
-
-    # Many Keras violence models output [violent, non_violent] but detection.py
-    # reads index [1] assuming [non_violent, violent]. When VIOLENCE_INVERT=true
-    # (the default), we flip: prob = 1 - prob, which corrects the class order.
-    violence_invert = os.getenv("VIOLENCE_INVERT", "true").lower() == "true"
 
     total_frames = max(info["total_frames"], 1)
     job["status"] = "processing"
@@ -186,13 +183,10 @@ def _process_video(job_id: str, result_queue: asyncio.Queue, loop: asyncio.Abstr
     except Exception:
         send_sms_alert = None
 
-    try:
-        from notifications.telegram_alert import send_telegram_alert
-    except Exception:
-        send_telegram_alert = None
-
     # Track which event types have already triggered phone notifications
     notified_types = set()
+    # Rolling window for temporal smoothing of violence probability
+    v_prob_window = []
 
     while True:
         ret, frame = cap.read()
@@ -216,21 +210,29 @@ def _process_video(job_id: str, result_queue: asyncio.Queue, loop: asyncio.Abstr
         if len(frame_buffer) > BUFFER_MAX:
             frame_buffer.pop(0)
 
-        # Run all models in parallel
+        # Run all models
         detections = run_parallel_detection(
             display_frame, frame_buffer,
             guns_knives, fire_smoke,
             violence_mdl, v_shape,
             yolo_conf=yolo_conf,
             violence_conf=violence_conf,
+            using_pretrained=using_pretrained,
+            prev_gray=prev_gray,
         )
 
-        # ── Post-processing: fix inverted violence model output ────────
-        if violence_invert:
-            raw_prob = detections["violence_prob"]
-            corrected_prob = 1.0 - raw_prob
-            detections["violence_prob"] = corrected_prob
-            detections["is_violent"] = corrected_prob >= violence_conf
+        # Update prev_gray for next frame's optical flow
+        prev_gray = cv2.cvtColor(display_frame, cv2.COLOR_BGR2GRAY)
+
+        # ── Temporal smoothing: 5-frame rolling average ───────────────
+        # Avoids false alarms from single noisy frames.
+        WINDOW = 5
+        v_prob_window.append(detections["violence_prob"])
+        if len(v_prob_window) > WINDOW:
+            v_prob_window.pop(0)
+        smoothed_prob = sum(v_prob_window) / len(v_prob_window)
+        detections["violence_prob"] = smoothed_prob
+        detections["is_violent"] = smoothed_prob >= violence_conf
 
         # Build alerts
         new_alerts = []
@@ -253,11 +255,6 @@ def _process_video(job_id: str, result_queue: asyncio.Queue, loop: asyncio.Abstr
                             send_sms_alert("Violence", video_ts, detections["violence_prob"], snapshot_path)
                         except Exception:
                             pass
-                    if send_telegram_alert:
-                        try:
-                            send_telegram_alert("Violence", video_ts, detections["violence_prob"], snapshot_path)
-                        except Exception:
-                            pass
 
         for det in detections["weapons"]:
             label = det["label"].capitalize()
@@ -277,11 +274,6 @@ def _process_video(job_id: str, result_queue: asyncio.Queue, loop: asyncio.Abstr
                             send_sms_alert(label, video_ts, det["confidence"], snapshot_path)
                         except Exception:
                             pass
-                    if send_telegram_alert:
-                        try:
-                            send_telegram_alert(label, video_ts, det["confidence"], snapshot_path)
-                        except Exception:
-                            pass
 
         for det in detections["fire_smoke"]:
             label = det["label"].capitalize()
@@ -299,11 +291,6 @@ def _process_video(job_id: str, result_queue: asyncio.Queue, loop: asyncio.Abstr
                     if send_sms_alert:
                         try:
                             send_sms_alert(label, video_ts, det["confidence"], snapshot_path)
-                        except Exception:
-                            pass
-                    if send_telegram_alert:
-                        try:
-                            send_telegram_alert(label, video_ts, det["confidence"], snapshot_path)
                         except Exception:
                             pass
 
@@ -535,6 +522,7 @@ async def generate_report_endpoint(job_id: str):
             snapshots=job["snapshots"],
             filename=job.get("filename", "unknown"),
             duration_frames=job.get("progress", 0),
+            violence_timeline=job.get("violence_timeline", []),
         )
     except Exception as e:
         logger.error("Report generation failed: %s", e)

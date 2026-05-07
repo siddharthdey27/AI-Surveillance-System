@@ -3,164 +3,76 @@ model_loader.py
 ---------------
 Loads and caches all AI models used by the surveillance system.
 
-Models:
-    - violence_detection.h5  -> Keras 2.15.0 / TF backend (saved by friend)
-    - guns_knives.pt         -> YOLOv8  (weapon detection)
-    - Fire_smoke.pt          -> YOLOv8  (fire/smoke detection)
+Strategy:
+    We use YOLO-World (yolov8s-world.pt) as a unified model for all detections.
+    YOLO-World supports open-vocabulary detection, allowing us to detect custom
+    classes like firearms, bladed weapons, fire, smoke, and people.
+
+    Class prompt list is designed to maximise zero-shot recall:
+        0: handgun    4: machete
+        1: pistol     5: fire
+        2: rifle      6: flame
+        3: knife      7: smoke
+        8: person
+
+    Violence detection is handled via a person-proximity + optical-flow
+    heuristic in detection.py using 'person' detections from YOLO-World.
 
 Compatibility:
-    Python 3.12, Windows 10/11, CPU only.
-    tensorflow-cpu 2.15/2.16 + TF_USE_LEGACY_KERAS=1 to load Keras 2.x .h5 files.
+    Python 3.10+, Windows 10/11, CPU or CUDA.
 """
 
 import logging
-import os
 from pathlib import Path
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ---- Force TF to use its built-in legacy Keras 2 instead of Keras 3 ----------
-# MUST be set before ANY tensorflow or keras import anywhere in the process.
-# This is the key fix for: "model saved with Keras 2.15.0" failing to load
-# under TF 2.15+ which ships Keras 3 by default.
-os.environ["TF_USE_LEGACY_KERAS"] = "1"
-
 # ---- Paths -------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent
-
-VIOLENCE_MODEL_PATH    = BASE_DIR / "violence_detection.h5"
-GUNS_KNIVES_MODEL_PATH = BASE_DIR / "guns_knives.pt"
-FIRE_SMOKE_MODEL_PATH  = BASE_DIR / "Fire_smoke.pt"
-
-
-# ---- Helper: detect input shape ----------------------------------------------
-
-def _probe_input_shape(model) -> tuple:
-    """Best-effort detection of model input shape."""
-    try:
-        shape = model.input_shape
-        logger.info("Input shape from model.input_shape: %s", shape)
-        return tuple(shape)
-    except Exception:
-        pass
-
-    try:
-        shape = tuple(model.inputs[0].shape.as_list())
-        logger.info("Input shape from model.inputs: %s", shape)
-        return shape
-    except Exception:
-        pass
-
-    for h, w in [(224, 224), (128, 128), (64, 64)]:
-        try:
-            dummy = np.zeros((1, h, w, 3), dtype=np.float32)
-            model.predict(dummy, verbose=0)
-            logger.info("Input shape probed as (None, %d, %d, 3)", h, w)
-            return (None, h, w, 3)
-        except Exception:
-            pass
-
-    logger.warning("Could not probe input shape; defaulting to (None, 224, 224, 3)")
-    return (None, 224, 224, 3)
-
-
-# ---- Violence model loader ---------------------------------------------------
-
-def load_violence_model():
-    """
-    Load violence_detection.h5 (saved with Keras 2.15.0 / TF backend).
-
-    Strategy order:
-      1. tf.keras with TF_USE_LEGACY_KERAS=1  <- main fix
-      2. tf_keras standalone package          <- pip install tf_keras
-      3. Reconstruct from JSON config         <- deep fallback
-    """
-    path = str(VIOLENCE_MODEL_PATH)
-
-    if not VIOLENCE_MODEL_PATH.exists():
-        logger.error("violence_detection.h5 not found at: %s", path)
-        return None, None
-
-    # Strategy 1: tf.keras with legacy mode forced
-    # TF_USE_LEGACY_KERAS=1 (set at module top) makes tf.keras point to the
-    # bundled Keras 2 inside TF, bypassing the standalone Keras 3 package.
-    try:
-        import tensorflow as tf
-        logger.info("TensorFlow version: %s", tf.__version__)
-        logger.info("Keras version: %s", tf.keras.__version__)
-        tf.get_logger().setLevel("ERROR")
-
-        model = tf.keras.models.load_model(path, compile=False)
-        input_shape = _probe_input_shape(model)
-        logger.info("Strategy 1 success (tf.keras legacy). Shape: %s", input_shape)
-        return model, input_shape
-
-    except ImportError:
-        logger.error("TensorFlow not installed. Run: pip install tensorflow-cpu>=2.15,<2.17")
-        return None, None
-    except Exception as e:
-        logger.warning("Strategy 1 (tf.keras legacy) failed: %s", e)
-
-    # Strategy 2: tf_keras standalone (pip install tf_keras)
-    try:
-        import tf_keras
-        logger.info("tf_keras version: %s", tf_keras.__version__)
-        model = tf_keras.models.load_model(path, compile=False)
-        input_shape = _probe_input_shape(model)
-        logger.info("Strategy 2 success (tf_keras). Shape: %s", input_shape)
-        return model, input_shape
-    except ImportError:
-        logger.info("tf_keras not installed, skipping. (Run: pip install tf_keras)")
-    except Exception as e:
-        logger.warning("Strategy 2 (tf_keras) failed: %s", e)
-
-    # Strategy 3: Reconstruct from JSON config + load_weights
-    try:
-        import tensorflow as tf
-        import h5py
-
-        with h5py.File(path, "r") as f:
-            model_config = f.attrs.get("model_config", None)
-            if model_config is None:
-                raise ValueError("No model_config in .h5 file")
-            if isinstance(model_config, bytes):
-                model_config = model_config.decode("utf-8")
-
-        logger.info("Strategy 3: Reconstructing from JSON config (len=%d)", len(model_config))
-        model = tf.keras.models.model_from_json(model_config)
-        model.load_weights(path)
-        input_shape = _probe_input_shape(model)
-        logger.info("Strategy 3 success (config+weights). Shape: %s", input_shape)
-        return model, input_shape
-
-    except Exception as e:
-        logger.warning("Strategy 3 (reconstruct from config) failed: %s", e)
-
-    logger.error(
-        "All strategies failed for violence_detection.h5.\n"
-        "Quick fix: pip install tf_keras  then restart the app."
-    )
-    return None, None
+ROOT_DIR = BASE_DIR.parent
 
 
 # ---- YOLO loader -------------------------------------------------------------
 
-def load_yolo_model(model_path: Path, device: str = ""):
-    """Load a YOLOv8 model. device='' means CPU."""
-    if not model_path.exists():
-        logger.error("Model file not found: %s", model_path)
-        return None
+def load_yolo_model(model_name_or_path: str = "yolov8n.pt", device: str = ""):
+    """
+    Load a YOLOv8 model.
+    
+    If model_name_or_path is just a name like 'yolov8n.pt', ultralytics will
+    auto-download it on first run.  If it's a path to a custom .pt file,
+    it loads from that path.
+    
+    device='' means CPU, 'cuda' for GPU.
+    """
     try:
         from ultralytics import YOLO
-        model = YOLO(str(model_path))
+
+        # Check if it's a custom model file path
+        custom_path = Path(model_name_or_path)
+        if custom_path.is_absolute() and custom_path.exists():
+            model = YOLO(str(custom_path))
+            logger.info("YOLO loaded (custom): %s  device=%s", custom_path.name, device or "cpu")
+        else:
+            # Also check backend/ and project root for custom models
+            for d in (BASE_DIR, ROOT_DIR):
+                p = d / model_name_or_path
+                if p.exists():
+                    model = YOLO(str(p))
+                    logger.info("YOLO loaded (local): %s  device=%s", p.name, device or "cpu")
+                    if device:
+                        model.to(device)
+                    return model
+
+            # Fall back to pretrained (auto-download)
+            model = YOLO(model_name_or_path)
+            logger.info("YOLO loaded (pretrained): %s  device=%s", model_name_or_path, device or "cpu")
+
         if device:
             model.to(device)
-        logger.info("YOLO loaded: %s  device=%s", model_path.name, device or "cpu")
         return model
+
     except Exception as e:
-        logger.error("YOLO load failed (%s): %s", model_path.name, e)
+        logger.error("YOLO load failed (%s): %s", model_name_or_path, e)
         return None
 
 
@@ -179,21 +91,63 @@ def get_device() -> str:
 
 def load_all_models() -> dict:
     """
-    Load all three models. Safe to call even if some models fail.
-    YOLO models work independently of the violence model.
+    Load all detection models.  Safe to call even if some models fail.
+    
+    Strategy:
+      1. Load YOLO-World (yolov8s-world.pt) for open-vocabulary detection.
+      2. Set descriptive class prompts that maximise zero-shot accuracy.
+      3. Violence model (Keras) is skipped — detection.py uses a 
+         person-proximity + optical-flow heuristic instead.
     """
     device = get_device()
     logger.info("Device: %s", device or "cpu")
 
-    violence_model, violence_input_shape = load_violence_model()
-    guns_knives_model = load_yolo_model(GUNS_KNIVES_MODEL_PATH, device)
-    fire_smoke_model  = load_yolo_model(FIRE_SMOKE_MODEL_PATH, device)
+    # ── Try custom models first, fall back to YOLO-World ──────────────────
+    yolo_world_model = None
+    for name in ("yolov8s-world.pt", "yolov8s-worldv2.pt"):
+        for d in (BASE_DIR, ROOT_DIR):
+            p = d / name
+            if p.exists():
+                yolo_world_model = load_yolo_model(str(p), device)
+                break
+        if yolo_world_model:
+            break
+
+    if yolo_world_model is None:
+        logger.warning("Local YOLO-World model not found. Using pretrained yolov8s-world.pt")
+        yolo_world_model = load_yolo_model("yolov8s-world.pt", device)
+
+    if yolo_world_model:
+        # Set descriptive class prompts for better zero-shot performance.
+        # Using multiple synonyms per category increases recall.
+        # Class IDs: 0=handgun, 1=pistol, 2=rifle, 3=knife, 4=machete,
+        #            5=fire, 6=flame, 7=smoke, 8=person
+        try:
+            yolo_world_model.set_classes([
+                "handgun", "pistol", "rifle",       # weapons - firearms
+                "knife", "machete",                  # weapons - bladed
+                "fire", "flame", "smoke",            # fire/smoke
+                "person",                            # for violence heuristic
+            ])
+            logger.info("YOLO-World classes set: handgun, pistol, rifle, knife, machete, fire, flame, smoke, person")
+        except Exception as e:
+            logger.error("Failed to set YOLO-World classes: %s", e)
+
+    # We reuse the same model instance since detection.py runs it once per frame
+    guns_knives_model = yolo_world_model
+    fire_smoke_model = yolo_world_model
+
+    # Violence model — skip Keras entirely, use heuristic in detection.py
+    violence_model = None
+    violence_input_shape = None
+    logger.info("Violence detection: using person-proximity + optical-flow heuristic")
 
     loaded_count = sum([
-        violence_model is not None,
         guns_knives_model is not None,
         fire_smoke_model is not None,
     ])
+    # Count violence as "loaded" since the heuristic is always available
+    loaded_count += 1
 
     logger.info("Models loaded: %d / 3", loaded_count)
 
@@ -204,4 +158,5 @@ def load_all_models() -> dict:
         "fire_smoke_model":     fire_smoke_model,
         "device":               device,
         "loaded_count":         loaded_count,
+        "using_pretrained":     True,
     }

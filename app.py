@@ -110,6 +110,7 @@ def _init_state():
         "frame_count":   0,
         "total_frames":  1,
         "current_ts":    "00:00:00",
+        "v_prob_window": [],   # rolling window for temporal smoothing
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -139,6 +140,7 @@ def _processing_loop(
     save_snapshots: bool,
     result_queue: queue.Queue,
     stop_event: threading.Event,
+    v_prob_window: list,
 ):
     """
     Background thread: reads frames, runs models, pushes results to queue.
@@ -192,13 +194,25 @@ def _processing_loop(
         )
 
         # ── Post-processing: fix inverted violence model output ────────
+        # IMPORTANT: Only invert when the model is actually loaded.
+        # When the model is None, detect_violence returns 0.0 (safe default).
+        # Inverting 0.0 → 1.0 would trigger violence alerts on EVERY frame.
         import os
         violence_invert = os.getenv("VIOLENCE_INVERT", "true").lower() == "true"
-        if violence_invert:
+        if violence_invert and violence_mdl is not None:
             raw_prob = detections["violence_prob"]
             corrected_prob = 1.0 - raw_prob
             detections["violence_prob"] = corrected_prob
-            detections["is_violent"] = corrected_prob >= violence_conf
+
+        # ── Temporal smoothing: 8-frame rolling average ───────────────
+        # Avoids false alarms from single noisy frames.
+        WINDOW = 8
+        v_prob_window.append(detections["violence_prob"])
+        if len(v_prob_window) > WINDOW:
+            v_prob_window.pop(0)
+        smoothed_prob = sum(v_prob_window) / len(v_prob_window)
+        detections["violence_prob"] = smoothed_prob
+        detections["is_violent"] = smoothed_prob >= violence_conf
 
         # Build alerts — using the passed-in alert_system, NOT session_state
         new_alerts = []
@@ -295,7 +309,8 @@ def render_sidebar(models: dict):
             "YOLO Confidence", 0.1, 1.0, 0.4, 0.05, key="yolo_conf",
         )
         violence_conf = st.slider(
-            "Violence Threshold", 0.1, 1.0, 0.6, 0.05, key="violence_conf",
+            "Violence Threshold", 0.1, 1.0, 0.75, 0.05, key="violence_conf",
+            help="Raise this if you see false violence alerts. 0.75+ is recommended.",
         )
 
         st.divider()
@@ -335,12 +350,37 @@ def render_sidebar(models: dict):
         if log_path.exists():
             with open(log_path, "rb") as f:
                 st.download_button(
-                    "Download Detection Log (CSV)",
+                    "⬇ Download Detection Log (CSV)",
                     data=f,
                     file_name="detections.csv",
                     mime="text/csv",
                     use_container_width=True,
                 )
+
+        # PDF Report — only after a session has run
+        if st.session_state.get("detection_log"):
+            if st.button("📄 Generate PDF Report", use_container_width=True):
+                import sys
+                sys.path.insert(0, str(Path(__file__).parent / "reports"))
+                try:
+                    from report_generator import generate_report
+                    pdf_path = generate_report(
+                        job_id="streamlit-session",
+                        alert_history=st.session_state["detection_log"],
+                        snapshots=[],
+                        filename="live-session",
+                        violence_timeline=[],
+                    )
+                    with open(pdf_path, "rb") as f:
+                        st.download_button(
+                            "⬇ Download PDF Report",
+                            data=f,
+                            file_name="incident_report.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                        )
+                except Exception as e:
+                    st.error(f"Report error: {e}")
 
     return {
         "uploaded_file": uploaded_file,
@@ -441,6 +481,7 @@ def main():
         st.session_state["processing"]    = True
         st.session_state["stop_flag"]     = False
         st.session_state["frame_count"]   = 0
+        st.session_state["v_prob_window"] = []
         new_q = queue.Queue(maxsize=32)
         st.session_state["frame_queue"]   = new_q
 
@@ -459,6 +500,7 @@ def main():
                 ctrl["save_snaps"],
                 new_q,
                 stop_event,
+                st.session_state["v_prob_window"],  # shared list for temporal smoothing
             ),
             daemon=True,
         )

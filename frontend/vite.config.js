@@ -7,7 +7,16 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/upload': 'http://localhost:8000',
-      '/stream': 'http://localhost:8000',
+      '/stream': {
+        target: 'http://localhost:8000',
+        // SSE requires no response buffering
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            proxyRes.headers['X-Accel-Buffering'] = 'no';
+            proxyRes.headers['Cache-Control'] = 'no-cache';
+          });
+        },
+      },
       '/alerts': 'http://localhost:8000',
       '/logs': 'http://localhost:8000',
       '/report': 'http://localhost:8000',
